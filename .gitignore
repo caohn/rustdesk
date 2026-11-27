@@ -62,3 +62,5 @@ flutter/web/
 .worktrees/
 # CAOsystems
 !flutter/assets/icon.png
+!flutter/assets/logo.png
+!flutter/assets/logo_dark.png
