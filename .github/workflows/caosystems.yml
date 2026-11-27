@@ -1,0 +1,147 @@
+name: CAOsystems - Compilar y empaquetar
+
+# Se ejecuta a mano desde la pestaña "Actions" del repositorio.
+on:
+  workflow_dispatch:
+    inputs:
+      solo_reempaquetar:
+        description: "Solo reempaquetar (usa la última compilación ya publicada, no vuelve a compilar)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  BUILD_TAG: caosystems-build   # release donde el build oficial deja los binarios "RustDesk"
+  RELEASE_TAG: caosystems       # release final con los instaladores CAOsystems
+  APP_NAME: CAOsystems
+  BUNDLE_ID: com.caosystems.net
+  URL_SCHEME: caosystems
+
+jobs:
+  # 1) Compila con el workflow oficial de RustDesk (ya incluye la config embebida y los íconos).
+  compilar:
+    if: ${{ !inputs.solo_reempaquetar }}
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+    with:
+      upload-artifact: true
+      upload-tag: "caosystems-build"
+
+  # 2) macOS: renombra RustDesk.app -> CAOsystems.app, ajusta Info.plist, firma ad-hoc y arma el DMG.
+  macos:
+    needs: compilar
+    if: ${{ always() }}
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Descargar DMG compilados
+        run: |
+          mkdir -p in out
+          gh release download "$BUILD_TAG" -R "$GITHUB_REPOSITORY" -D in \
+            -p 'rustdesk-*-x86_64.dmg' -p 'rustdesk-*-aarch64.dmg' || true
+          ls -l in
+          if ! ls in/*.dmg >/dev/null 2>&1; then
+            echo "::error::No hay DMG de macOS en el release $BUILD_TAG (revisa el job de compilación de macOS)"
+            exit 1
+          fi
+
+      - name: Renombrar a CAOsystems y firmar
+        run: |
+          set -euo pipefail
+          for dmg in in/*.dmg; do
+            base="$(basename "$dmg" .dmg)"        # rustdesk-1.5.3-x86_64
+            sufijo="${base#rustdesk-}"            # 1.5.3-x86_64
+            echo "== $base =="
+
+            mnt="$(mktemp -d)"
+            hdiutil attach -readonly -nobrowse -mountpoint "$mnt" "$dmg"
+            stage="$(mktemp -d)"
+            app="$stage/$APP_NAME.app"
+            ditto "$mnt/RustDesk.app" "$app"
+            hdiutil detach "$mnt" -force
+
+            mv "$app/Contents/MacOS/RustDesk" "$app/Contents/MacOS/$APP_NAME"
+
+            plist="$app/Contents/Info.plist"
+            pb() { /usr/libexec/PlistBuddy -c "$1" "$plist"; }
+            pb "Set :CFBundleExecutable $APP_NAME"
+            pb "Set :CFBundleName $APP_NAME"
+            pb "Delete :CFBundleDisplayName" 2>/dev/null || true
+            pb "Add :CFBundleDisplayName string $APP_NAME"
+            pb "Set :CFBundleIdentifier $BUNDLE_ID"
+            pb "Set :CFBundleURLTypes:0:CFBundleURLName $BUNDLE_ID" || true
+            pb "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 $URL_SCHEME" || true
+
+            xattr -cr "$app"
+            codesign --force --deep --sign - "$app"
+            codesign --verify --deep --strict "$app"
+
+            ln -s /Applications "$stage/Applications"
+            hdiutil create -volname "$APP_NAME" -srcfolder "$stage" -ov -format UDZO \
+              "out/$APP_NAME-$sufijo.dmg"
+          done
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: caosystems-macos
+          path: out/*.dmg
+
+  # 3) Windows: el ejecutable portable/instalador se renombra a CAOsystems-<versión>-x86_64.exe.
+  #    El nombre interno, la carpeta de instalación y el servicio ya salen como "CAOsystems"
+  #    porque vienen de la configuración embebida.
+  windows:
+    needs: compilar
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Descargar y renombrar
+        run: |
+          set -euo pipefail
+          mkdir -p in out
+          gh release download "$BUILD_TAG" -R "$GITHUB_REPOSITORY" -D in -p 'rustdesk-*-x86_64.exe' || true
+          if ! ls in/*.exe >/dev/null 2>&1; then
+            echo "::error::No hay .exe de Windows en el release $BUILD_TAG (revisa el job de compilación de Windows)"
+            exit 1
+          fi
+          for f in in/rustdesk-*-x86_64.exe; do
+            b="$(basename "$f")"
+            cp "$f" "out/$APP_NAME-${b#rustdesk-}"
+          done
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: caosystems-windows
+          path: out/*.exe
+
+  # 4) Publica todo junto en el release "caosystems".
+  publicar:
+    needs: [macos, windows]
+    if: ${{ always() && (needs.macos.result == 'success' || needs.windows.result == 'success') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: caosystems-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publicar release
+        run: |
+          ls -l dist
+          if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
+              --title "CAOsystems Soporte Remoto" \
+              --notes "Instaladores de CAOsystems (basado en RustDesk, AGPL-3.0)." \
+              --prerelease
+          fi
+          gh release upload "$RELEASE_TAG" dist/* -R "$GITHUB_REPOSITORY" --clobber

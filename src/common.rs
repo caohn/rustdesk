@@ -2507,6 +2507,21 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
 }
 
 pub fn load_custom_client() {
+    // CAOSYSTEMS-PATCH: configuración embebida al compilar (no requiere custom.txt firmado).
+    const CAO_EMBEDDED_CONFIG: &str = include_str!("../res/caosystems/config.json");
+    if !CAO_EMBEDDED_CONFIG.trim().is_empty() {
+        apply_custom_client_data(CAO_EMBEDDED_CONFIG.trim().as_bytes());
+        // Contraseña permanente opcional, tomada del secret de GitHub al compilar.
+        if let Some(password) = option_env!("CAO_PERMANENT_PASSWORD") {
+            if !password.is_empty() {
+                config::HARD_SETTINGS
+                    .write()
+                    .unwrap()
+                    .insert("password".to_owned(), password.to_owned());
+            }
+        }
+        return;
+    }
     #[cfg(debug_assertions)]
     if let Ok(data) = std::fs::read_to_string("./custom.txt") {
         read_custom_client(data.trim());
@@ -2618,8 +2633,13 @@ pub fn read_custom_client(config: &str) {
         log::error!("Failed to dec custom client config");
         return;
     };
+    apply_custom_client_data(&data);
+}
+
+// CAOSYSTEMS-PATCH: aplica una configuración de cliente ya validada (o embebida al compilar).
+pub fn apply_custom_client_data(data: &[u8]) {
     let Ok(mut data) =
-        serde_json::from_slice::<std::collections::HashMap<String, serde_json::Value>>(&data)
+        serde_json::from_slice::<std::collections::HashMap<String, serde_json::Value>>(data)
     else {
         log::error!("Failed to parse custom client config");
         return;
