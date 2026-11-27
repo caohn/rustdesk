@@ -63,6 +63,7 @@ jobs:
             app="$stage/$APP_NAME.app"
             ditto "$mnt/RustDesk.app" "$app"
             hdiutil detach "$mnt" -force
+            sleep 3
 
             mv "$app/Contents/MacOS/RustDesk" "$app/Contents/MacOS/$APP_NAME"
 
@@ -81,8 +82,19 @@ jobs:
             codesign --verify --deep --strict "$app"
 
             ln -s /Applications "$stage/Applications"
-            hdiutil create -volname "$APP_NAME" -srcfolder "$stage" -ov -format UDZO \
-              "out/$APP_NAME-$sufijo.dmg"
+            # hdiutil a veces falla con "Resource busy" en los runners de GitHub: reintentar.
+            for intento in 1 2 3 4 5; do
+              if hdiutil create -volname "$APP_NAME" -srcfolder "$stage" -ov -format UDZO \
+                "out/$APP_NAME-$sufijo.dmg"; then
+                break
+              fi
+              if [ "$intento" = 5 ]; then
+                echo "::error::hdiutil create falló 5 veces"
+                exit 1
+              fi
+              echo "hdiutil create falló (intento $intento), reintento en $((intento * 10)) s"
+              sleep $((intento * 10))
+            done
           done
           ls -l out
 
